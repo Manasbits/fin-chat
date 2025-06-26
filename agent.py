@@ -7,6 +7,7 @@ import json
 import os
 import re
 import time
+import traceback
 from datetime import datetime
 from textwrap import dedent
 from typing import Optional, Dict, Any, List, Union
@@ -507,71 +508,126 @@ async def process_whatsapp_message(phone_number: str, message: str, media_type: 
         await send_whatsapp_message(phone_number, error_msg)
 
 @app.get("/webhook")
-async def verify_webhook(
-    mode: str = None,
-    token: str = None,
-    challenge: str = None
-):
+async def verify_webhook(request: Request):
     """Verify webhook for WhatsApp API."""
+    query_params = request.query_params
+    mode = query_params.get("hub.mode")
+    token = query_params.get("hub.verify_token")
+    challenge = query_params.get("hub.challenge")
+    
+    print(f"Verification request - Mode: {mode}, Token: {token}, Challenge: {challenge}")
+    
     if mode and token:
         if mode == 'subscribe' and token == WHATSAPP_VERIFY_TOKEN:
+            print("Webhook verified successfully")
             return Response(content=challenge, media_type="text/plain")
+    
+    print("Webhook verification failed")
     raise HTTPException(status_code=403, detail="Verification failed")
 
 @app.post("/webhook")
 async def webhook(request: Request):
     """Handle incoming WhatsApp messages via webhook."""
     try:
-        data = await request.json()
-        
-        # Log the incoming webhook data for debugging
-        print("Incoming webhook data:", json.dumps(data, indent=2))
+        # Parse the request body
+        try:
+            data = await request.json()
+            print("Incoming webhook data:", json.dumps(data, indent=2))
+        except Exception as e:
+            print(f"Error parsing JSON: {e}")
+            return JSONResponse(content={"status": "error", "message": "Invalid JSON"}, status_code=400)
         
         # Check if this is a WhatsApp API event
         if 'object' not in data or 'entry' not in data:
+            print("Invalid webhook format - missing 'object' or 'entry'")
             return JSONResponse(content={"status": "ignored"}, status_code=200)
         
-        for entry in data['entry']:
-            for change in entry.get('changes', []):
-                value = change.get('value', {})
-                
-                # Check if this is a message
-                if 'messages' in value:
-                    for message in value['messages']:
-                        phone_number = message['from']
-                        message_id = message['id']
+        # Process each entry
+        for entry in data.get('entry', []):
+            try:
+                for change in entry.get('changes', []):
+                    value = change.get('value', {})
+                    
+                    # Check if this is a message
+                    messages = value.get('messages', [])
+                    if not messages:
+                        continue
                         
-                        # Handle different message types
-                        if 'text' in message:
-                            text = message['text']['body']
-                            asyncio.create_task(process_whatsapp_message(phone_number, text))
+                    for message in messages:
+                        try:
+                            if not all(key in message for key in ['from', 'id']):
+                                print("Invalid message format - missing required fields")
+                                continue
+                                
+                            phone_number = message['from']
+                            message_id = message['id']
+                            print(f"Processing message {message_id} from {phone_number}")
                             
-                        elif 'image' in message:
-                            image_id = message['image']['id']
-                            image_url = f"https://graph.facebook.com/{WHATSAPP_API_VERSION}/{image_id}"
-                            caption = message['image'].get('caption', '')
-                            asyncio.create_task(process_whatsapp_message(phone_number, caption, 'image', image_url))
+                            # Handle different message types
+                            if 'text' in message:
+                                text = message['text'].get('body', '')
+                                if not text.strip():
+                                    print("Empty text message received")
+                                    continue
+                                print(f"Processing text message: {text[:100]}...")
+                                asyncio.create_task(process_whatsapp_message(phone_number, text))
+                                
+                            elif 'image' in message:
+                                image = message.get('image', {})
+                                if 'id' not in image:
+                                    print("Image message missing ID")
+                                    continue
+                                image_id = image['id']
+                                image_url = f"https://graph.facebook.com/{WHATSAPP_API_VERSION}/{image_id}"
+                                caption = image.get('caption', '')
+                                print(f"Processing image message with ID: {image_id}")
+                                asyncio.create_task(process_whatsapp_message(phone_number, caption, 'image', image_url))
+                                
+                            elif 'audio' in message:
+                                audio = message.get('audio', {})
+                                if 'id' not in audio:
+                                    print("Audio message missing ID")
+                                    continue
+                                audio_id = audio['id']
+                                audio_url = f"https://graph.facebook.com/{WHATSAPP_API_VERSION}/{audio_id}"
+                                print(f"Processing audio message with ID: {audio_id}")
+                                asyncio.create_task(process_whatsapp_message(phone_number, "", 'audio', audio_url))
+                                
+                            elif 'video' in message:
+                                video = message.get('video', {})
+                                if 'id' not in video:
+                                    print("Video message missing ID")
+                                    continue
+                                video_id = video['id']
+                                video_url = f"https://graph.facebook.com/{WHATSAPP_API_VERSION}/{video_id}"
+                                print(f"Processing video message with ID: {video_id}")
+                                asyncio.create_task(process_whatsapp_message(phone_number, "", 'video', video_url))
+                                
+                            elif 'document' in message:
+                                document = message.get('document', {})
+                                if 'id' not in document:
+                                    print("Document message missing ID")
+                                    continue
+                                doc_id = document['id']
+                                doc_url = f"https://graph.facebook.com/{WHATSAPP_API_VERSION}/{doc_id}"
+                                print(f"Processing document with ID: {doc_id}")
+                                asyncio.create_task(process_whatsapp_message(phone_number, "", 'document', doc_url))
+                                
+                        except Exception as e:
+                            print(f"Error processing individual message: {e}")
+                            continue
                             
-                        elif 'audio' in message:
-                            audio_id = message['audio']['id']
-                            audio_url = f"https://graph.facebook.com/{WHATSAPP_API_VERSION}/{audio_id}"
-                            asyncio.create_task(process_whatsapp_message(phone_number, "", 'audio', audio_url))
-                            
-                        elif 'video' in message:
-                            video_id = message['video']['id']
-                            video_url = f"https://graph.facebook.com/{WHATSAPP_API_VERSION}/{video_id}"
-                            asyncio.create_task(process_whatsapp_message(phone_number, "", 'video', video_url))
-                            
-                        elif 'document' in message:
-                            doc_id = message['document']['id']
-                            doc_url = f"https://graph.facebook.com/{WHATSAPP_API_VERSION}/{doc_id}"
-                            asyncio.create_task(process_whatsapp_message(phone_number, "", 'document', doc_url))
+            except Exception as e:
+                print(f"Error processing entry: {e}")
+                continue
         
         return JSONResponse(content={"status": "success"}, status_code=200)
     
     except Exception as e:
-        print(f"Error processing webhook: {e}")
-        raise HTTPException(status_code=500, detail="Internal server error")
+        error_msg = f"Unexpected error in webhook: {e}"
+        print(error_msg)
+        print("Full traceback:", traceback.format_exc())
+        raise HTTPException(status_code=500, detail=error_msg)
 
 def run_whatsapp_webhook(host: str = "0.0.0.0", port: int = 8000):
     """Run the WhatsApp webhook server."""
