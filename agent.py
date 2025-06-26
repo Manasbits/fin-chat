@@ -221,171 +221,261 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     )
     
     try:
-        try:
-            # Get the response with multimodal inputs
-            response = await finance_agent.astream(
-                message,
-                images=images,
-                audio=audio,
-                videos=videos,
-                user_id=user_id,
-                session_id=session_id,
-            )
-            
-            # Stream the response back to WhatsApp
-            full_response = ""
-            chunk_buffer = ""
-            
-            async for chunk in response:
-                full_response += chunk
-                chunk_buffer += chunk
-                
-                # Send in chunks of reasonable size
-                if len(chunk_buffer) > 100 or '\n' in chunk_buffer:
-                    await send_whatsapp_message(phone_number, chunk_buffer)
-                    chunk_buffer = ""
-                    # Show typing indicator between chunks
-                    await send_whatsapp_typing(phone_number, True)
-            
-            # Send any remaining content
-            if chunk_buffer:
-                await send_whatsapp_message(phone_number, chunk_buffer)
-                
-            # Update conversation history in memory
-            if 'conversation' not in user_memories[user_id]:
-                user_memories[user_id]['conversation'] = []
-                
-            user_memories[user_id]['conversation'].append({
-                'role': 'user',
-                'content': message,
-                'timestamp': datetime.now().isoformat(),
-                'media_type': media_type
-            })
-            
-            user_memories[user_id]['conversation'].append({
-                'role': 'assistant',
-                'content': full_response,
-                'timestamp': datetime.now().isoformat()
-            })
-            
-            # Keep conversation history manageable
-            if len(user_memories[user_id]['conversation']) > 20:
-                user_memories[user_id]['conversation'] = user_memories[user_id]['conversation'][-20:]
-                
-            return full_response
-            
-        except Exception as e:
-            error_msg = f"Error generating response: {str(e)}"
-            print(error_msg)
-            print("Response generation error:", traceback.format_exc())
-            await send_whatsapp_message(phone_number, "I encountered an error processing your request. Please try again.")
-            return ""
-            
-        finally:
-            # Always ensure typing indicator is turned off
-            await send_whatsapp_typing(phone_number, False)
-            
+        # Get the response with multimodal inputs
+        response = await asyncio.to_thread(
+            finance_agent.run,
+            user_input,
+            user_id=user_id,
+            session_id=session_id,
+            images=images if images else None,
+            audio=audio if audio else None,
+            videos=videos if videos else None,
+            stream=False
+        )
+        
+        # Extract the content from the response
         response_content = response.content if hasattr(response, 'content') else str(response)
         
         # Stream the response in chunks
         await stream_response(
             lambda text: update.message.reply_text(text),
-{{ ... }}
+            response_content
+        )
+        
+    except Exception as e:
+        await update.message.reply_text(f"Sorry, I encountered an error: {str(e)}")
+
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Send a welcome message when the command /start is issued."""
+    user_id = str(update.effective_user.id)
+    session_id = f"telegram_{user_id}"
+    
+    # Check if user has previous memories
+    user_memories = memory.get_user_memories(user_id=user_id)
+    
+    if user_memories:
+        # Personalized welcome for returning users
+        welcome_msg = (
+            "Namaste! Main Tara hoon - aapki smart AI-based financial buddy. 💰\n\n"
+            "Accha laga aapko phir se dekh kar! Main aapki previous conversations yaad rakhti hoon, "
+            "toh aap jahan chhoda tha wahan se continue kar sakte hain.\n\n"
+            "Koi naya financial sawaal hai ya previous topic pe baat karni hai? 😊"
+        )
+    else:
+        # Welcome message for new users
+        welcome_msg = (
+            "Namaste! Main Tara hoon - aapki smart AI-based financial buddy. 💰\n\n"
+            "Mujhe pata aap tech-savvy ho, lekin kabhi-kabhi paise manage karna thoda confusing lag sakta hai. "
+            "Koi baat nahi, main hoon na aapki madad ke liye!\n\n"
+            "Aap mujhe koi bhi financial sawaal pooch sakte hain. Main aapki madad karne ke liye yahaan hoon! 😊"
+        )
+    
+    await update.message.reply_text(welcome_msg)
+
+async def memory_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Show user what the bot remembers about them."""
+    user_id = str(update.effective_user.id)
+    
+    # Get user memories
+    user_memories = memory.get_user_memories(user_id=user_id)
+    
+    if user_memories:
+        memories_text = "Main aapke baare mein yeh yaad rakhti hoon:\n\n"
+        for i, mem in enumerate(user_memories[:5], 1):  # Show only first 5 memories
+            memories_text += f"{i}. {mem.memory}\n"
+        
+        if len(user_memories) > 5:
+            memories_text += f"\n... aur {len(user_memories) - 5} aur memories bhi hain!"
+    else:
+        memories_text = "Abhi tak main aapke baare mein kuch specific yaad nahi rakha hai. Thoda aur baat karte hain toh main aapko better samajh paungi! 😊"
+    
+    await update.message.reply_text(memories_text)
+
+async def clear_memory_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Clear user's memories."""
+    user_id = str(update.effective_user.id)
+    
+    # Clear user memories
+    memory.delete_user_memory(user_id=user_id)
+    
+    await update.message.reply_text(
+        "Theek hai! Main aapke baare mein sab kuch bhool gayi hoon. "
+        "Ab hum fresh start kar sakte hain! 😊"
+    )
+
+def run_telegram_bot(token: str) -> None:
+    """Run the Telegram bot."""
+    print("Starting Telegram bot with multimodal support...")  # Updated message
+    
+    application = Application.builder().token(token).build()
+    
+    # Add handlers
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(CommandHandler("memory", memory_command))
+    application.add_handler(CommandHandler("clear_memory", clear_memory_command))
+    
+    # THIS IS THE KEY FIX - Replace the old handler with multimodal support
+    application.add_handler(MessageHandler(
+        filters.TEXT | filters.PHOTO | filters.VOICE | filters.AUDIO | filters.VIDEO | filters.Document.ALL,
+        handle_message
+    ))
+    
+    print("Bot is running with multimodal support. Press Ctrl+C to stop.")
+    print("Supported inputs:")
+    print("- Text messages")
+    print("- Photos/Images") 
+    print("- Voice messages")
+    print("- Audio files")
+    print("- Video files")
+    print("Available commands:")
+    print("- /start - Start conversation")
+    print("- /memory - See what the bot remembers about you")
+    print("- /clear_memory - Clear your memory")
+    application.run_polling()
+    
+async def run_terminal() -> None:
+    """Run the agent in terminal mode."""
+    print("\n" + "="*50)
+    print("Namaste! Main Tara hoon - aapki smart AI-based financial buddy.")
+    print("Terminal mode with memory enabled!")
+    
+    # Use a default user ID for terminal mode
+    user_id = "terminal_user"
+    session_id = "terminal_session"
+    
+    async def print_streamed(text):
+        print("\nTara:", end=" ")
+        for chunk in text.split('\n'):
+            if chunk.strip():
+                print(chunk.strip())
+                await asyncio.sleep(0.3)
+        print()  # Add an extra newline at the end
+    
+    while True:
+        try:
+            user_input = input("\nAap: ")
+            
+            if user_input.lower() in ['exit', 'quit', 'bye', 'alvida']:
+                print("\nAlvida! Phir milenge. 😊")
+                break
+            
+            # Special commands for terminal
+            if user_input.lower() == '/memory':
+                user_memories = memory.get_user_memories(user_id=user_id)
+                if user_memories:
+                    print("\nMain aapke baare mein yeh yaad rakhti hoon:")
+                    for i, mem in enumerate(user_memories, 1):
+                        print(f"{i}. {mem.memory}")
+                else:
+                    print("\nAbhi tak koi specific memories nahi hain.")
+                continue
+            
+            if user_input.lower() == '/clear_memory':
+                memory.delete_user_memory(user_id=user_id)
+                print("\nMemory clear kar di! Fresh start! 😊")
+                continue
+                
+            if not user_input:
+                continue
+                
+            # Run the blocking call in a separate thread
+            response = await asyncio.to_thread(
+                finance_agent.run,
+                user_input,
+                user_id=user_id,
+                session_id=session_id,
+                stream=False
+            )
+            
+            response_content = response.content if hasattr(response, 'content') else str(response)
+            
+            # Print a typing indicator
+            print("\nTara likh rahi hoon...\n")
+            
+            # Stream the response
+            await print_streamed(response_content)
+            
+        except KeyboardInterrupt:
+            print("\n\nAlvida! Phir milenge. 😊")
+            break
+        except Exception as e:
+            print(f"\nMaaf, kuch to gadbad hai: {str(e)}")
+
+# WhatsApp Configuration
+
+# WhatsApp Configuration
+WHATSAPP_TOKEN = os.getenv('WHATSAPP_TOKEN')
+WHATSAPP_PHONE_NUMBER_ID = os.getenv('WHATSAPP_PHONE_NUMBER_ID')
+WHATSAPP_VERIFY_TOKEN = os.getenv('WHATSAPP_VERIFY_TOKEN', 'your_verify_token')
+WHATSAPP_API_VERSION = 'v18.0'
+WHATSAPP_API_URL = f'https://graph.facebook.com/{WHATSAPP_API_VERSION}/{WHATSAPP_PHONE_NUMBER_ID}/messages'
+
+# FastAPI app
+app = FastAPI(title="Tara WhatsApp API")
+
+class WhatsAppMessage(BaseModel):
+    messaging_product: str
+    to: str
+    recipient_type: str = "individual"
+    type: str
+    text: Optional[Dict[str, str]] = None
+    image: Optional[Dict[str, str]] = None
+    audio: Optional[Dict[str, str]] = None
+    video: Optional[Dict[str, str]] = None
+    document: Optional[Dict[str, str]] = None
 
 class WhatsAppWebhookPayload(BaseModel):
     object: str
     entry: List[Dict[str, Any]]
 
-async def send_whatsapp_typing(phone_number: str, is_typing: bool) -> bool:
-    """Send typing indicator to WhatsApp."""
-    url = f"https://graph.facebook.com/{WHATSAPP_API_VERSION}/{WHATSAPP_PHONE_NUMBER_ID}/messages"
+async def send_whatsapp_message(phone_number: str, message: str) -> bool:
+    """Send a text message via WhatsApp API."""
     headers = {
-        "Authorization": f"Bearer {WHATSAPP_TOKEN}",
-        "Content-Type": "application/json"
+        'Authorization': f'Bearer {WHATSAPP_TOKEN}',
+        'Content-Type': 'application/json'
     }
     
-    action = "typing_on" if is_typing else "typing_off"
-    data = {
+    payload = {
         "messaging_product": "whatsapp",
-        "recipient_type": "individual",
         "to": phone_number,
         "type": "text",
-        "text": {"preview_url": False, "body": ""},
-        "status": "sent",
-        "messaging_type": "RESPONSE",
-        "recipient_name": "User",
-        "sender": {"name": "Tara"},
-        "action": {"type": action}
+        "text": {"body": message}
     }
     
     try:
-        async with aiohttp.ClientSession() as session:
-            async with session.post(url, headers=headers, json=data) as response:
-                if response.status != 200:
-                    error = await response.text()
-                    print(f"Error sending typing indicator: {error}")
-                return response.status == 200
+        response = requests.post(WHATSAPP_API_URL, headers=headers, json=payload)
+        response.raise_for_status()
+        return True
     except Exception as e:
-        print(f"Exception sending typing indicator: {e}")
+        print(f"Error sending WhatsApp message: {e}")
         return False
 
-async def send_whatsapp_message(phone_number: str, message: str, reply_to: Optional[str] = None) -> bool:
-    """Send a message via WhatsApp with support for replies."""
+async def send_whatsapp_typing(phone_number: str):
+    """Send WhatsApp typing indicator to user."""
     url = f"https://graph.facebook.com/{WHATSAPP_API_VERSION}/{WHATSAPP_PHONE_NUMBER_ID}/messages"
     headers = {
         "Authorization": f"Bearer {WHATSAPP_TOKEN}",
         "Content-Type": "application/json"
     }
-    
-    # Basic message data
     data = {
         "messaging_product": "whatsapp",
-        "recipient_type": "individual",
         "to": phone_number,
-        "type": "text",
-        "text": {"preview_url": True, "body": message}
+        "type": "typing",
+        "typing": {"duration": 2}  # duration is optional, WhatsApp may ignore
     }
-    
-    # Add context for replies if available
-    if reply_to:
-        data["context"] = {"message_id": reply_to}
-    
     try:
-        async with aiohttp.ClientSession() as session:
-            async with session.post(url, headers=headers, json=data) as response:
-                if response.status != 200:
-                    error = await response.text()
-                    print(f"Error sending WhatsApp message: {error}")
-                    return False
-                return True
+        requests.post(url, headers=headers, json=data)
     except Exception as e:
-        print(f"Exception sending WhatsApp message: {e}")
-        return False
+        print(f"Error sending WhatsApp typing indicator: {e}")
 
 async def process_whatsapp_message(phone_number: str, message: str, media_type: str = None, media_id: str = None):
-    """Process incoming WhatsApp messages and generate responses with memory and typing indicators."""
+    """Process incoming WhatsApp messages and generate responses with memory/session management and typing indicator."""
     user_id = f"whatsapp_{phone_number}"
-{{ ... }}
-    session_id = f"whatsapp_{phone_number}_{int(time.time())}"
-    
-    # Initialize memory if not exists
-    if user_id not in user_memories:
-        user_memories[user_id] = {}
-    
-    # Get or create user session
-    if 'session' not in user_memories[user_id]:
-        user_memories[user_id]['session'] = {
-            'start_time': datetime.now().isoformat(),
-            'message_count': 0,
-            'last_active': datetime.now().isoformat()
-        }
-    
-    # Update session info
-    user_memories[user_id]['session']['message_count'] += 1
-    user_memories[user_id]['session']['last_active'] = datetime.now().isoformat()
-    
-    # Send typing indicator
-    await send_whatsapp_typing(phone_number, True)
+    # Use a persistent session_id for the user (memory/session management)
+    session_id = memory.get_user_session_id(user_id)
+    if not session_id:
+        session_id = f"whatsapp_{phone_number}_session"
+        memory.set_user_session_id(user_id, session_id)
     
     # Prepare media inputs
     images, audio, videos = [], [], []
@@ -398,24 +488,18 @@ async def process_whatsapp_message(phone_number: str, message: str, media_type: 
                 "Authorization": f"Bearer {WHATSAPP_TOKEN}",
                 "Content-Type": "application/json"
             }
-            
-            # Get the actual media URL
             response = requests.get(media_url, headers=headers)
             response.raise_for_status()
             media_data = response.json()
-            
             if 'url' not in media_data:
                 print(f"No URL found in media data: {media_data}")
                 await send_whatsapp_message(phone_number, "Sorry, I couldn't process the media. Please try again.")
                 return
-                
             # Download the actual media content
             download_url = media_data['url']
             media_response = requests.get(download_url, headers={"Authorization": f"Bearer {WHATSAPP_TOKEN}"})
             media_response.raise_for_status()
             content = media_response.content
-            
-            # Process based on media type
             if media_type == 'image':
                 images.append(Image(content=content))
                 if not message:
@@ -429,11 +513,9 @@ async def process_whatsapp_message(phone_number: str, message: str, media_type: 
                 if not message:
                     message = "Please analyze this video and provide relevant financial advice."
             elif media_type == 'document':
-                # For documents, we'll try to handle images
                 images.append(Image(content=content))
                 if not message:
                     message = "Please analyze this document and provide relevant financial advice."
-                    
         except requests.exceptions.RequestException as e:
             error_msg = f"Error downloading media: {str(e)}"
             print(error_msg)
@@ -445,29 +527,22 @@ async def process_whatsapp_message(phone_number: str, message: str, media_type: 
             print("Media processing error:", traceback.format_exc())
             await send_whatsapp_message(phone_number, "Sorry, I couldn't process the media. Please try again with a different file.")
             return
-    
     try:
-        # Get the response with multimodal inputs
-        response = await asyncio.to_thread(
-            finance_agent.run,
-            message or "Hello!",
+        # Send typing indicator before generating response
+        await send_whatsapp_typing(phone_number)
+        # Get the response with multimodal inputs and persistent session
+        response_text = await finance_agent.generate_response(
             user_id=user_id,
             session_id=session_id,
-            images=images if images else None,
-            audio=audio if audio else None,
-            videos=videos if videos else None,
-            stream=False
+            message=message,
+            images=images,
+            audio=audio,
+            videos=videos,
         )
-        
-        # Extract the content from the response
-        response_content = response.content if hasattr(response, 'content') else str(response)
-        
-        # Send the response back to WhatsApp
-        await send_whatsapp_message(phone_number, response_content)
-        
+        await send_whatsapp_message(phone_number, response_text)
     except Exception as e:
-        error_msg = f"Sorry, I encountered an error: {str(e)}"
-        await send_whatsapp_message(phone_number, error_msg)
+        print(f"Error generating/sending WhatsApp response: {e}")
+        await send_whatsapp_message(phone_number, f"Sorry, I encountered an error: {e}")
 
 @app.get("/webhook")
 async def verify_webhook(request: Request):
@@ -596,80 +671,59 @@ def run_whatsapp_webhook(host: str = "0.0.0.0", port: int = 8000):
     
     uvicorn.run(app, host=host, port=port)
 
-async def run_services(telegram: bool = False, whatsapp: bool = False, host: str = '0.0.0.0', port: int = 8000):
-    """Run the specified services concurrently."""
-    tasks = []
-    
-    if telegram:
-        token = os.getenv('TELEGRAM_BOT_TOKEN')
-        if not token:
-            print("Error: TELEGRAM_BOT_TOKEN environment variable not set")
-            return
-        print("Starting Telegram bot...")
-        # Create a task for the Telegram bot
-        telegram_task = asyncio.create_task(asyncio.to_thread(run_telegram_bot, token))
-        tasks.append(telegram_task)
-    
-    if whatsapp:
-        if not all([os.getenv('WHATSAPP_TOKEN'), os.getenv('WHATSAPP_PHONE_NUMBER_ID')]):
-            print("Error: WhatsApp environment variables not properly configured")
-            return
-        print(f"Starting WhatsApp webhook server on {host}:{port}...")
-        # Create a task for the WhatsApp webhook server
-        config = uvicorn.Config(
-            app=app,
-            host=host,
-            port=port,
-            log_level="info",
-            workers=1
-        )
-        server = uvicorn.Server(config)
-        whatsapp_task = asyncio.create_task(server.serve())
-        tasks.append(whatsapp_task)
-    
-    if not tasks:
-        print("No services specified to run")
-        return
-    
-    # Run all tasks concurrently
-    await asyncio.gather(*tasks)
-
 def main():
     """Main function to handle command line arguments."""
-    parser = argparse.ArgumentParser(description='Tara - Your Financial Assistant with Memory')
-    
-    # Make the group non-exclusive to allow multiple services
-    group = parser.add_argument_group('Services')
-    group.add_argument('--terminal', action='store_true', help='Run in terminal mode')
-    group.add_argument('--telegram', action='store_true', help='Run Telegram bot using token from .env')
-    group.add_argument('--whatsapp', action='store_true', help='Run WhatsApp webhook server')
-    
-    # Add WhatsApp webhook server options
-    whatsapp_group = parser.add_argument_group('WhatsApp Webhook Options')
-    whatsapp_group.add_argument('--host', type=str, default='0.0.0.0', help='Host to run the webhook server on')
-    whatsapp_group.add_argument('--port', type=int, default=8000, help='Port to run the webhook server on')
-    
+    parser = argparse.ArgumentParser(description="Run the financial assistant agent.")
+    parser.add_argument("--telegram", action="store_true", help="Run Telegram bot")
+    parser.add_argument("--terminal", action="store_true", help="Run in terminal mode")
+    parser.add_argument("--whatsapp", action="store_true", help="Run WhatsApp webhook server")
+    parser.add_argument("--host", type=str, default="0.0.0.0", help="Host for webhook server")
+    parser.add_argument("--port", type=int, default=8000, help="Port for webhook server")
     args = parser.parse_args()
-    
-    # Check if no service is specified
-    if not any([args.terminal, args.telegram, args.whatsapp]):
-        parser.print_help()
-        return
-    
-    if args.terminal:
-        asyncio.run(run_terminal())
+
+    import sys
+    tasks = []
+    # Fix event loop warning for Python 3.10+
+    if sys.version_info >= (3, 10):
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
     else:
-        # Check if Telegram is requested but token is missing
-        if args.telegram and not os.getenv('TELEGRAM_BOT_TOKEN'):
-            print("Error: TELEGRAM_BOT_TOKEN not found in .env file")
-            return
-            
-        asyncio.run(run_services(
-            telegram=args.telegram,
-            whatsapp=args.whatsapp,
-            host=args.host,
-            port=args.port
-        ))
+        loop = asyncio.get_event_loop()
+
+    if args.terminal:
+        tasks.append(run_terminal())
+    if args.telegram:
+        tasks.append(run_telegram())
+    # WhatsApp runs in its own thread and does not need to be in tasks
+    if args.whatsapp:
+        import threading
+        def start_whatsapp():
+            run_whatsapp_webhook(host=args.host, port=args.port)
+        t = threading.Thread(target=start_whatsapp, daemon=True)
+        t.start()
+
+    # If Telegram or Terminal is running, use asyncio loop
+    if tasks:
+        try:
+            loop.run_until_complete(asyncio.gather(*tasks))
+        except KeyboardInterrupt:
+            print("Shutting down...")
+    # If only WhatsApp is running, just keep main thread alive
+    elif args.whatsapp:
+        try:
+            while True:
+                import time
+                time.sleep(1)
+        except KeyboardInterrupt:
+            print("Shutting down WhatsApp webhook...")
+    else:
+        print("Please specify at least one mode: --telegram, --terminal, or --whatsapp")
+        print("Please add them to your .env file and try again.")
+        return
+
 
 if __name__ == "__main__":
     main()
