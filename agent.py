@@ -450,32 +450,11 @@ async def send_whatsapp_message(phone_number: str, message: str) -> bool:
         print(f"Error sending WhatsApp message: {e}")
         return False
 
-async def send_whatsapp_typing(phone_number: str):
-    """Send a typing indicator to the WhatsApp user."""
-    url = f"https://graph.facebook.com/{WHATSAPP_API_VERSION}/{WHATSAPP_PHONE_NUMBER_ID}/messages"
-    headers = {
-        "Authorization": f"Bearer {WHATSAPP_TOKEN}",
-        "Content-Type": "application/json"
-    }
-    payload = {
-        "messaging_product": "whatsapp",
-        "to": phone_number,
-        "type": "action",
-        "action": {"typing": "true"}
-    }
-    try:
-        resp = requests.post(url, headers=headers, json=payload)
-        resp.raise_for_status()
-    except Exception as e:
-        print(f"Failed to send typing indicator: {e}")
-
+# WhatsApp Cloud API does NOT support typing indicators. We'll simulate a delay instead.
 async def process_whatsapp_message(phone_number: str, message: str, media_type: str = None, media_id: str = None):
-    """Process incoming WhatsApp messages and generate responses with session/memory management and typing indicator."""
+    """Process incoming WhatsApp messages and generate responses with session/memory management."""
     user_id = f"whatsapp_{phone_number}"
     session_id = f"whatsapp_{phone_number}"
-
-    # Send typing indicator
-    await send_whatsapp_typing(phone_number)
 
     # --- Memory/session management ---
     # Load or initialize memory for this WhatsApp user
@@ -490,13 +469,11 @@ async def process_whatsapp_message(phone_number: str, message: str, media_type: 
     
     if media_type and media_id:
         try:
-            # First, get the media URL using the media ID
             media_url = f"https://graph.facebook.com/{WHATSAPP_API_VERSION}/{media_id}"
             headers = {
                 "Authorization": f"Bearer {WHATSAPP_TOKEN}",
                 "Content-Type": "application/json"
             }
-            # Get the actual media URL
             response = requests.get(media_url, headers=headers)
             response.raise_for_status()
             media_data = response.json()
@@ -504,7 +481,6 @@ async def process_whatsapp_message(phone_number: str, message: str, media_type: 
                 print(f"No URL found in media data: {media_data}")
                 await send_whatsapp_message(phone_number, "Sorry, I couldn't process the media. Please try again.")
                 return
-            # Download the actual media content
             download_url = media_data['url']
             media_response = requests.get(download_url, headers={"Authorization": f"Bearer {WHATSAPP_TOKEN}"})
             media_response.raise_for_status()
@@ -537,8 +513,11 @@ async def process_whatsapp_message(phone_number: str, message: str, media_type: 
             await send_whatsapp_message(phone_number, "Sorry, I couldn't process the media. Please try again with a different file.")
             return
     try:
-        # Get the response with multimodal inputs and memory
-        response_text = await finance_agent.run_async(
+        # Simulate typing delay
+        await asyncio.sleep(1)
+        # Call the synchronous agent.run in an async context
+        response_text = await asyncio.to_thread(
+            finance_agent.run,
             message,
             user_id=user_id,
             session_id=session_id,
@@ -553,7 +532,9 @@ async def process_whatsapp_message(phone_number: str, message: str, media_type: 
         await send_whatsapp_message(phone_number, response_text)
     except Exception as e:
         print(f"Error processing WhatsApp message: {e}")
-        await send_whatsapp_message(phone_number, f"Sorry, I encountered an error: {e}")
+        error_msg = f"Sorry, I encountered an error: {e}"
+        await send_whatsapp_message(phone_number, error_msg)
+
         await send_whatsapp_message(phone_number, error_msg)
 
 @app.get("/webhook")
