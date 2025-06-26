@@ -450,7 +450,7 @@ async def send_whatsapp_message(phone_number: str, message: str) -> bool:
         print(f"Error sending WhatsApp message: {e}")
         return False
 
-async def process_whatsapp_message(phone_number: str, message: str, media_type: str = None, media_url: str = None):
+async def process_whatsapp_message(phone_number: str, message: str, media_type: str = None, media_id: str = None):
     """Process incoming WhatsApp messages and generate responses."""
     user_id = f"whatsapp_{phone_number}"
     session_id = f"whatsapp_{phone_number}_{int(time.time())}"
@@ -458,12 +458,32 @@ async def process_whatsapp_message(phone_number: str, message: str, media_type: 
     # Prepare media inputs
     images, audio, videos = [], [], []
     
-    if media_type and media_url:
+    if media_type and media_id:
         try:
-            response = requests.get(media_url, headers={"Authorization": f"Bearer {WHATSAPP_TOKEN}"})
-            response.raise_for_status()
-            content = response.content
+            # First, get the media URL using the media ID
+            media_url = f"https://graph.facebook.com/{WHATSAPP_API_VERSION}/{media_id}"
+            headers = {
+                "Authorization": f"Bearer {WHATSAPP_TOKEN}",
+                "Content-Type": "application/json"
+            }
             
+            # Get the actual media URL
+            response = requests.get(media_url, headers=headers)
+            response.raise_for_status()
+            media_data = response.json()
+            
+            if 'url' not in media_data:
+                print(f"No URL found in media data: {media_data}")
+                await send_whatsapp_message(phone_number, "Sorry, I couldn't process the media. Please try again.")
+                return
+                
+            # Download the actual media content
+            download_url = media_data['url']
+            media_response = requests.get(download_url, headers={"Authorization": f"Bearer {WHATSAPP_TOKEN}"})
+            media_response.raise_for_status()
+            content = media_response.content
+            
+            # Process based on media type
             if media_type == 'image':
                 images.append(Image(content=content))
                 if not message:
@@ -477,12 +497,22 @@ async def process_whatsapp_message(phone_number: str, message: str, media_type: 
                 if not message:
                     message = "Please analyze this video and provide relevant financial advice."
             elif media_type == 'document':
-                if any(ext in message.lower() for ext in ['.jpg', '.jpeg', '.png', '.gif']):
-                    images.append(Image(content=content))
-                    if not message:
-                        message = "Please analyze this image and provide relevant financial advice."
+                # For documents, we'll try to handle images
+                images.append(Image(content=content))
+                if not message:
+                    message = "Please analyze this document and provide relevant financial advice."
+                    
+        except requests.exceptions.RequestException as e:
+            error_msg = f"Error downloading media: {str(e)}"
+            print(error_msg)
+            await send_whatsapp_message(phone_number, "Sorry, I encountered an error processing the media. Please try again.")
+            return
         except Exception as e:
-            print(f"Error processing media: {e}")
+            error_msg = f"Error processing media: {str(e)}"
+            print(error_msg)
+            print("Media processing error:", traceback.format_exc())
+            await send_whatsapp_message(phone_number, "Sorry, I couldn't process the media. Please try again with a different file.")
+            return
     
     try:
         # Get the response with multimodal inputs
@@ -578,10 +608,9 @@ async def webhook(request: Request):
                                     print("Image message missing ID")
                                     continue
                                 image_id = image['id']
-                                image_url = f"https://graph.facebook.com/{WHATSAPP_API_VERSION}/{image_id}"
                                 caption = image.get('caption', '')
                                 print(f"Processing image message with ID: {image_id}")
-                                asyncio.create_task(process_whatsapp_message(phone_number, caption, 'image', image_url))
+                                asyncio.create_task(process_whatsapp_message(phone_number, caption, 'image', image_id))
                                 
                             elif 'audio' in message:
                                 audio = message.get('audio', {})
@@ -589,9 +618,8 @@ async def webhook(request: Request):
                                     print("Audio message missing ID")
                                     continue
                                 audio_id = audio['id']
-                                audio_url = f"https://graph.facebook.com/{WHATSAPP_API_VERSION}/{audio_id}"
                                 print(f"Processing audio message with ID: {audio_id}")
-                                asyncio.create_task(process_whatsapp_message(phone_number, "", 'audio', audio_url))
+                                asyncio.create_task(process_whatsapp_message(phone_number, "", 'audio', audio_id))
                                 
                             elif 'video' in message:
                                 video = message.get('video', {})
@@ -599,9 +627,8 @@ async def webhook(request: Request):
                                     print("Video message missing ID")
                                     continue
                                 video_id = video['id']
-                                video_url = f"https://graph.facebook.com/{WHATSAPP_API_VERSION}/{video_id}"
                                 print(f"Processing video message with ID: {video_id}")
-                                asyncio.create_task(process_whatsapp_message(phone_number, "", 'video', video_url))
+                                asyncio.create_task(process_whatsapp_message(phone_number, "", 'video', video_id))
                                 
                             elif 'document' in message:
                                 document = message.get('document', {})
@@ -609,9 +636,8 @@ async def webhook(request: Request):
                                     print("Document message missing ID")
                                     continue
                                 doc_id = document['id']
-                                doc_url = f"https://graph.facebook.com/{WHATSAPP_API_VERSION}/{doc_id}"
                                 print(f"Processing document with ID: {doc_id}")
-                                asyncio.create_task(process_whatsapp_message(phone_number, "", 'document', doc_url))
+                                asyncio.create_task(process_whatsapp_message(phone_number, "", 'document', doc_id))
                                 
                         except Exception as e:
                             print(f"Error processing individual message: {e}")
