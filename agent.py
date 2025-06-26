@@ -451,32 +451,40 @@ async def send_whatsapp_message(phone_number: str, message: str) -> bool:
         return False
 
 async def send_whatsapp_typing(phone_number: str):
-    """Send WhatsApp typing indicator to user."""
+    """Send a typing indicator to the WhatsApp user."""
     url = f"https://graph.facebook.com/{WHATSAPP_API_VERSION}/{WHATSAPP_PHONE_NUMBER_ID}/messages"
     headers = {
         "Authorization": f"Bearer {WHATSAPP_TOKEN}",
         "Content-Type": "application/json"
     }
-    data = {
+    payload = {
         "messaging_product": "whatsapp",
         "to": phone_number,
-        "type": "typing",
-        "typing": {"duration": 2}  # duration is optional, WhatsApp may ignore
+        "type": "action",
+        "action": {"typing": "true"}
     }
     try:
-        requests.post(url, headers=headers, json=data)
+        resp = requests.post(url, headers=headers, json=payload)
+        resp.raise_for_status()
     except Exception as e:
-        print(f"Error sending WhatsApp typing indicator: {e}")
+        print(f"Failed to send typing indicator: {e}")
 
 async def process_whatsapp_message(phone_number: str, message: str, media_type: str = None, media_id: str = None):
-    """Process incoming WhatsApp messages and generate responses with memory/session management and typing indicator."""
+    """Process incoming WhatsApp messages and generate responses with session/memory management and typing indicator."""
     user_id = f"whatsapp_{phone_number}"
-    # Use a persistent session_id for the user (memory/session management)
-    session_id = memory.get_user_session_id(user_id)
-    if not session_id:
-        session_id = f"whatsapp_{phone_number}_session"
-        memory.set_user_session_id(user_id, session_id)
-    
+    session_id = f"whatsapp_{phone_number}"
+
+    # Send typing indicator
+    await send_whatsapp_typing(phone_number)
+
+    # --- Memory/session management ---
+    # Load or initialize memory for this WhatsApp user
+    memory = None
+    if hasattr(finance_agent, "get_memory"):
+        memory = finance_agent.get_memory(user_id)
+    if memory is None:
+        memory = {}
+
     # Prepare media inputs
     images, audio, videos = [], [], []
     
@@ -488,6 +496,7 @@ async def process_whatsapp_message(phone_number: str, message: str, media_type: 
                 "Authorization": f"Bearer {WHATSAPP_TOKEN}",
                 "Content-Type": "application/json"
             }
+            # Get the actual media URL
             response = requests.get(media_url, headers=headers)
             response.raise_for_status()
             media_data = response.json()
@@ -528,21 +537,24 @@ async def process_whatsapp_message(phone_number: str, message: str, media_type: 
             await send_whatsapp_message(phone_number, "Sorry, I couldn't process the media. Please try again with a different file.")
             return
     try:
-        # Send typing indicator before generating response
-        await send_whatsapp_typing(phone_number)
-        # Get the response with multimodal inputs and persistent session
-        response_text = await finance_agent.generate_response(
+        # Get the response with multimodal inputs and memory
+        response_text = await finance_agent.run_async(
+            message,
             user_id=user_id,
             session_id=session_id,
-            message=message,
             images=images,
             audio=audio,
             videos=videos,
+            memory=memory
         )
+        # Save memory/session state if supported
+        if hasattr(finance_agent, "save_memory"):
+            finance_agent.save_memory(user_id, memory)
         await send_whatsapp_message(phone_number, response_text)
     except Exception as e:
-        print(f"Error generating/sending WhatsApp response: {e}")
+        print(f"Error processing WhatsApp message: {e}")
         await send_whatsapp_message(phone_number, f"Sorry, I encountered an error: {e}")
+        await send_whatsapp_message(phone_number, error_msg)
 
 @app.get("/webhook")
 async def verify_webhook(request: Request):
@@ -673,57 +685,37 @@ def run_whatsapp_webhook(host: str = "0.0.0.0", port: int = 8000):
 
 def main():
     """Main function to handle command line arguments."""
-    parser = argparse.ArgumentParser(description="Run the financial assistant agent.")
-    parser.add_argument("--telegram", action="store_true", help="Run Telegram bot")
-    parser.add_argument("--terminal", action="store_true", help="Run in terminal mode")
-    parser.add_argument("--whatsapp", action="store_true", help="Run WhatsApp webhook server")
-    parser.add_argument("--host", type=str, default="0.0.0.0", help="Host for webhook server")
-    parser.add_argument("--port", type=int, default=8000, help="Port for webhook server")
+    parser = argparse.ArgumentParser(description='Tara - Your Financial Assistant with Memory')
+    group = parser.add_mutually_exclusive_group(required=True)
+    group.add_argument('--terminal', action='store_true', help='Run in terminal mode')
+    group.add_argument('--telegram', action='store_true', help='Run Telegram bot using token from .env')
+    group.add_argument('--whatsapp', action='store_true', help='Run WhatsApp webhook server')
+    
+    # Add WhatsApp webhook server options
+    whatsapp_group = parser.add_argument_group('WhatsApp Webhook Options')
+    whatsapp_group.add_argument('--host', type=str, default='0.0.0.0', help='Host to run the webhook server on')
+    whatsapp_group.add_argument('--port', type=int, default=8000, help='Port to run the webhook server on')
+    
     args = parser.parse_args()
-
-    import sys
-    tasks = []
-    # Fix event loop warning for Python 3.10+
-    if sys.version_info >= (3, 10):
-        try:
-            loop = asyncio.get_running_loop()
-        except RuntimeError:
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-    else:
-        loop = asyncio.get_event_loop()
-
+    
     if args.terminal:
-        tasks.append(run_terminal())
-    if args.telegram:
-        tasks.append(run_telegram())
-    # WhatsApp runs in its own thread and does not need to be in tasks
-    if args.whatsapp:
-        import threading
-        def start_whatsapp():
-            run_whatsapp_webhook(host=args.host, port=args.port)
-        t = threading.Thread(target=start_whatsapp, daemon=True)
-        t.start()
-
-    # If Telegram or Terminal is running, use asyncio loop
-    if tasks:
-        try:
-            loop.run_until_complete(asyncio.gather(*tasks))
-        except KeyboardInterrupt:
-            print("Shutting down...")
-    # If only WhatsApp is running, just keep main thread alive
+        asyncio.run(run_terminal())
+    elif args.telegram:
+        token = os.getenv('TELEGRAM_BOT_TOKEN')
+        if not token:
+            print("Error: TELEGRAM_BOT_TOKEN not found in .env file")
+            return
+        run_telegram_bot(token)
     elif args.whatsapp:
-        try:
-            while True:
-                import time
-                time.sleep(1)
-        except KeyboardInterrupt:
-            print("Shutting down WhatsApp webhook...")
-    else:
-        print("Please specify at least one mode: --telegram, --terminal, or --whatsapp")
-        print("Please add them to your .env file and try again.")
-        return
-
+        # Verify required environment variables
+        required_vars = ['WHATSAPP_TOKEN', 'WHATSAPP_PHONE_NUMBER_ID']
+        missing_vars = [var for var in required_vars if not os.getenv(var)]
+        if missing_vars:
+            print(f"Error: Missing required environment variables: {', '.join(missing_vars)}")
+            print("Please add them to your .env file and try again.")
+            return
+            
+        run_whatsapp_webhook(host=args.host, port=args.port)
 
 if __name__ == "__main__":
     main()
