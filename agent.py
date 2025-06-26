@@ -395,6 +395,12 @@ async def run_terminal() -> None:
             await print_streamed(response_content)
             
         except KeyboardInterrupt:
+            print("\n\nAlvida! Phir milenge. 😊")
+            break
+        except Exception as e:
+            print(f"\nMaaf, kuch to gadbad hai: {str(e)}")
+
+# WhatsApp Configuration
 
 # WhatsApp Configuration
 WHATSAPP_TOKEN = os.getenv('WHATSAPP_TOKEN')
