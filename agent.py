@@ -1,20 +1,31 @@
 import argparse
 import asyncio
+import base64
+import hashlib
+import hmac
+import json
 import os
+import re
+import time
+from datetime import datetime
 from textwrap import dedent
-from typing import Optional
+from typing import Optional, Dict, Any, List, Union
 
+from fastapi import FastAPI, Request, Response, HTTPException, status
+from fastapi.responses import JSONResponse
+from pydantic import BaseModel
 from agno.agent import Agent
 from agno.models.google import Gemini
 from agno.memory.v2.db.sqlite import SqliteMemoryDb
 from agno.memory.v2.memory import Memory
 from agno.storage.sqlite import SqliteStorage
-from agno.media import Image, Audio, Video  # Add these imports
+from agno.media import Image, Audio, Video
 from dotenv import load_dotenv
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 import requests
 from io import BytesIO
+import uvicorn
 
 # Load environment variables from .env file
 load_dotenv()
@@ -384,10 +395,186 @@ async def run_terminal() -> None:
             await print_streamed(response_content)
             
         except KeyboardInterrupt:
-            print("\n\nAlvida! Phir milenge. 😊")
-            break
+
+# WhatsApp Configuration
+WHATSAPP_TOKEN = os.getenv('WHATSAPP_TOKEN')
+WHATSAPP_PHONE_NUMBER_ID = os.getenv('WHATSAPP_PHONE_NUMBER_ID')
+WHATSAPP_VERIFY_TOKEN = os.getenv('WHATSAPP_VERIFY_TOKEN', 'your_verify_token')
+WHATSAPP_API_VERSION = 'v18.0'
+WHATSAPP_API_URL = f'https://graph.facebook.com/{WHATSAPP_API_VERSION}/{WHATSAPP_PHONE_NUMBER_ID}/messages'
+
+# FastAPI app
+app = FastAPI(title="Tara WhatsApp API")
+
+class WhatsAppMessage(BaseModel):
+    messaging_product: str
+    to: str
+    recipient_type: str = "individual"
+    type: str
+    text: Optional[Dict[str, str]] = None
+    image: Optional[Dict[str, str]] = None
+    audio: Optional[Dict[str, str]] = None
+    video: Optional[Dict[str, str]] = None
+    document: Optional[Dict[str, str]] = None
+
+class WhatsAppWebhookPayload(BaseModel):
+    object: str
+    entry: List[Dict[str, Any]]
+
+async def send_whatsapp_message(phone_number: str, message: str) -> bool:
+    """Send a text message via WhatsApp API."""
+    headers = {
+        'Authorization': f'Bearer {WHATSAPP_TOKEN}',
+        'Content-Type': 'application/json'
+    }
+    
+    payload = {
+        "messaging_product": "whatsapp",
+        "to": phone_number,
+        "type": "text",
+        "text": {"body": message}
+    }
+    
+    try:
+        response = requests.post(WHATSAPP_API_URL, headers=headers, json=payload)
+        response.raise_for_status()
+        return True
+    except Exception as e:
+        print(f"Error sending WhatsApp message: {e}")
+        return False
+
+async def process_whatsapp_message(phone_number: str, message: str, media_type: str = None, media_url: str = None):
+    """Process incoming WhatsApp messages and generate responses."""
+    user_id = f"whatsapp_{phone_number}"
+    session_id = f"whatsapp_{phone_number}_{int(time.time())}"
+    
+    # Prepare media inputs
+    images, audio, videos = [], [], []
+    
+    if media_type and media_url:
+        try:
+            response = requests.get(media_url, headers={"Authorization": f"Bearer {WHATSAPP_TOKEN}"})
+            response.raise_for_status()
+            content = response.content
+            
+            if media_type == 'image':
+                images.append(Image(content=content))
+                if not message:
+                    message = "Please analyze this image and provide relevant financial advice."
+            elif media_type == 'audio':
+                audio.append(Audio(content=content))
+                if not message:
+                    message = "Please transcribe and respond to this audio message."
+            elif media_type == 'video':
+                videos.append(Video(content=content))
+                if not message:
+                    message = "Please analyze this video and provide relevant financial advice."
+            elif media_type == 'document':
+                if any(ext in message.lower() for ext in ['.jpg', '.jpeg', '.png', '.gif']):
+                    images.append(Image(content=content))
+                    if not message:
+                        message = "Please analyze this image and provide relevant financial advice."
         except Exception as e:
-            print(f"\nMaaf, kuch to gadbad hai: {str(e)}")
+            print(f"Error processing media: {e}")
+    
+    try:
+        # Get the response with multimodal inputs
+        response = await asyncio.to_thread(
+            finance_agent.run,
+            message or "Hello!",
+            user_id=user_id,
+            session_id=session_id,
+            images=images if images else None,
+            audio=audio if audio else None,
+            videos=videos if videos else None,
+            stream=False
+        )
+        
+        # Extract the content from the response
+        response_content = response.content if hasattr(response, 'content') else str(response)
+        
+        # Send the response back to WhatsApp
+        await send_whatsapp_message(phone_number, response_content)
+        
+    except Exception as e:
+        error_msg = f"Sorry, I encountered an error: {str(e)}"
+        await send_whatsapp_message(phone_number, error_msg)
+
+@app.get("/webhook")
+async def verify_webhook(
+    mode: str = None,
+    token: str = None,
+    challenge: str = None
+):
+    """Verify webhook for WhatsApp API."""
+    if mode and token:
+        if mode == 'subscribe' and token == WHATSAPP_VERIFY_TOKEN:
+            return Response(content=challenge, media_type="text/plain")
+    raise HTTPException(status_code=403, detail="Verification failed")
+
+@app.post("/webhook")
+async def webhook(request: Request):
+    """Handle incoming WhatsApp messages via webhook."""
+    try:
+        data = await request.json()
+        
+        # Log the incoming webhook data for debugging
+        print("Incoming webhook data:", json.dumps(data, indent=2))
+        
+        # Check if this is a WhatsApp API event
+        if 'object' not in data or 'entry' not in data:
+            return JSONResponse(content={"status": "ignored"}, status_code=200)
+        
+        for entry in data['entry']:
+            for change in entry.get('changes', []):
+                value = change.get('value', {})
+                
+                # Check if this is a message
+                if 'messages' in value:
+                    for message in value['messages']:
+                        phone_number = message['from']
+                        message_id = message['id']
+                        
+                        # Handle different message types
+                        if 'text' in message:
+                            text = message['text']['body']
+                            asyncio.create_task(process_whatsapp_message(phone_number, text))
+                            
+                        elif 'image' in message:
+                            image_id = message['image']['id']
+                            image_url = f"https://graph.facebook.com/{WHATSAPP_API_VERSION}/{image_id}"
+                            caption = message['image'].get('caption', '')
+                            asyncio.create_task(process_whatsapp_message(phone_number, caption, 'image', image_url))
+                            
+                        elif 'audio' in message:
+                            audio_id = message['audio']['id']
+                            audio_url = f"https://graph.facebook.com/{WHATSAPP_API_VERSION}/{audio_id}"
+                            asyncio.create_task(process_whatsapp_message(phone_number, "", 'audio', audio_url))
+                            
+                        elif 'video' in message:
+                            video_id = message['video']['id']
+                            video_url = f"https://graph.facebook.com/{WHATSAPP_API_VERSION}/{video_id}"
+                            asyncio.create_task(process_whatsapp_message(phone_number, "", 'video', video_url))
+                            
+                        elif 'document' in message:
+                            doc_id = message['document']['id']
+                            doc_url = f"https://graph.facebook.com/{WHATSAPP_API_VERSION}/{doc_id}"
+                            asyncio.create_task(process_whatsapp_message(phone_number, "", 'document', doc_url))
+        
+        return JSONResponse(content={"status": "success"}, status_code=200)
+    
+    except Exception as e:
+        print(f"Error processing webhook: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+def run_whatsapp_webhook(host: str = "0.0.0.0", port: int = 8000):
+    """Run the WhatsApp webhook server."""
+    print(f"Starting WhatsApp webhook server on http://{host}:{port}")
+    print(f"Webhook URL: https://your-domain.com/webhook")
+    print(f"Verification Token: {WHATSAPP_VERIFY_TOKEN}")
+    print("Press Ctrl+C to stop")
+    
+    uvicorn.run(app, host=host, port=port)
 
 def main():
     """Main function to handle command line arguments."""
@@ -395,18 +582,33 @@ def main():
     group = parser.add_mutually_exclusive_group(required=True)
     group.add_argument('--terminal', action='store_true', help='Run in terminal mode')
     group.add_argument('--telegram', action='store_true', help='Run Telegram bot using token from .env')
+    group.add_argument('--whatsapp', action='store_true', help='Run WhatsApp webhook server')
+    
+    # Add WhatsApp webhook server options
+    whatsapp_group = parser.add_argument_group('WhatsApp Webhook Options')
+    whatsapp_group.add_argument('--host', type=str, default='0.0.0.0', help='Host to run the webhook server on')
+    whatsapp_group.add_argument('--port', type=int, default=8000, help='Port to run the webhook server on')
     
     args = parser.parse_args()
     
-    if args.telegram:
-        telegram_token = os.getenv('TELEGRAM_BOT_TOKEN')
-        if not telegram_token:
-            print("Error: TELEGRAM_BOT_TOKEN not found in environment variables")
-            print("Please make sure you have TELEGRAM_BOT_TOKEN=your_token_here in your .env file")
-            return
-        run_telegram_bot(telegram_token)
-    else:
+    if args.terminal:
         asyncio.run(run_terminal())
+    elif args.telegram:
+        token = os.getenv('TELEGRAM_BOT_TOKEN')
+        if not token:
+            print("Error: TELEGRAM_BOT_TOKEN not found in .env file")
+            return
+        run_telegram_bot(token)
+    elif args.whatsapp:
+        # Verify required environment variables
+        required_vars = ['WHATSAPP_TOKEN', 'WHATSAPP_PHONE_NUMBER_ID']
+        missing_vars = [var for var in required_vars if not os.getenv(var)]
+        if missing_vars:
+            print(f"Error: Missing required environment variables: {', '.join(missing_vars)}")
+            print("Please add them to your .env file and try again.")
+            return
+            
+        run_whatsapp_webhook(host=args.host, port=args.port)
 
 if __name__ == "__main__":
     main()

@@ -29,4 +29,4 @@ RUN mkdir -p tmp
 # Other required environment variables from .env
 
 # Command to run the application
-CMD ["python", "agent.py", "--telegram"]
+CMD ["python", "agent.py", "--whatsapp"]
