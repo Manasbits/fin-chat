@@ -516,7 +516,7 @@ async def process_whatsapp_message(phone_number: str, message: str, media_type: 
         # Simulate typing delay
         await asyncio.sleep(1)
         # Call the synchronous agent.run in an async context
-        response_text = await asyncio.to_thread(
+        response = await asyncio.to_thread(
             finance_agent.run,
             message,
             user_id=user_id,
@@ -526,6 +526,11 @@ async def process_whatsapp_message(phone_number: str, message: str, media_type: 
             videos=videos,
             memory=memory
         )
+        # Extract the actual string content
+        if hasattr(response, "content"):
+            response_text = response.content
+        else:
+            response_text = str(response)
         # Save memory/session state if supported
         if hasattr(finance_agent, "save_memory"):
             finance_agent.save_memory(user_id, memory)
