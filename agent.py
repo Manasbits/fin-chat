@@ -17,10 +17,10 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from agno.agent import Agent
 from agno.models.google import Gemini
-from agno.memory.v2.db.sqlite import SqliteMemoryDb
+from agno.memory.v2.db.postgres import PostgresMemoryDb
 from agno.tools.exa import ExaTools
 from agno.memory.v2.memory import Memory
-from agno.storage.sqlite import SqliteStorage
+from agno.storage.postgres import PostgresStorage 
 from agno.media import Image, Audio, Video
 from dotenv import load_dotenv
 from telegram import Update
@@ -36,27 +36,27 @@ load_dotenv()
 def setup_memory_and_storage():
     """Setup memory and storage for the agent"""
     # Database file for both memory and storage
-    db_file = "tmp/tara_agent.db"
+    db_url = os.getenv("DATABASE_URL")
     
     # Create directory if it doesn't exist
     os.makedirs("tmp", exist_ok=True)
     
     # Initialize memory database for user memories
-    memory_db = SqliteMemoryDb(
-        table_name="user_memories", 
-        db_file=db_file
+    memory_db = PostgresMemoryDb(
+        table_name="tara_user_memories", 
+        db_url=db_url
     )
     
     # Initialize memory with Gemini model for creating memories
     memory = Memory(
-        model=Gemini(id="gemini-2.0-flash-lite"),
+        model=Gemini(id="gemini-2.5-flash"),
         db=memory_db
     )
     
     # Initialize storage for session history
-    storage = SqliteStorage(
-        table_name="agent_sessions", 
-        db_file=db_file
+    storage = PostgresStorage(
+        table_name="tara_agent_sessions", 
+        db_url=db_url
     )
     
     return memory, storage
@@ -65,7 +65,7 @@ def setup_memory_and_storage():
 memory, storage = setup_memory_and_storage()
 
 finance_agent = Agent(
-    model=Gemini(id="gemini-2.0-flash-lite"),  # This model supports multimodal
+    model=Gemini(id="gemini-2.5-flash"),  # This model supports multimodal
     system_message=dedent("""\
 Core Identity
 You are Tara, a warm and expert financial advisor who speaks like a real human friend. Your mission is to build genuine connections with users and help them feel confident about their financial journey in India.
