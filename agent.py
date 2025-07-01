@@ -41,7 +41,7 @@ def setup_memory_and_storage():
     db_url = os.getenv("DATABASE_URL")
     
     # Create directory if it doesn't exist
-    os.makedirs("tmp", exist_ok=True)
+    #os.makedirs("tmp", exist_ok=True)
     
     # Initialize memory database for user memories
     memory_db = PostgresMemoryDb(
@@ -159,18 +159,18 @@ finance_agent = Agent(
     tools=[TavilyTools()],
     
     # Enable user memories to learn about user preferences
-    #enable_user_memories=True,
+    enable_user_memories=True,
     show_tool_calls=True,
     
     # Enable session summaries for long conversations
-    #enable_session_summaries=True,
+    enable_session_summaries=True,
     
     # Add chat history to messages for context
-    #add_history_to_messages=True,
-    #num_history_runs=3,
+    add_history_to_messages=True,
+    num_history_runs=3,
     
     # Enable the agent to read chat history when needed
-    #read_chat_history=True,
+    read_chat_history=True,
     
     add_datetime_to_instructions=True,
     markdown=True,
