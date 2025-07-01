@@ -51,3 +51,4 @@ fastapi
 uvicorn
 exa-py
 psycopg[binary]
+tavily-python

@@ -11,7 +11,7 @@ import traceback
 from datetime import datetime
 from textwrap import dedent
 from typing import Optional, Dict, Any, List, Union
-
+import logging
 from fastapi import FastAPI, Request, Response, HTTPException, status
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
@@ -24,8 +24,11 @@ from agno.memory.v2.memory import Memory
 from agno.storage.postgres import PostgresStorage 
 from agno.media import Image, Audio, Video
 from dotenv import load_dotenv
-from telegram import Update
-from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
+from telegram import Update, ReplyKeyboardMarkup, ReplyKeyboardRemove
+from telegram.ext import (
+    Application, CommandHandler, MessageHandler, 
+    filters, ContextTypes, ConversationHandler
+)
 import requests
 from io import BytesIO
 import uvicorn
@@ -196,4 +199,144 @@ finance_agent = Agent(
     markdown=True,
 )
 
-finance_agent.print_response("Share a 2 sentence horror story.")
+# Telegram bot setup and handlers
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+if not TELEGRAM_BOT_TOKEN:
+    raise ValueError("TELEGRAM_BOT_TOKEN environment variable not set")
+
+# Define conversation states
+HANDLE_MESSAGE = 1
+
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Send a welcome message when the command /start is issued."""
+    user = update.effective_user
+    welcome_message = (
+        f"Hi {user.first_name}! 👋\n\n"
+        "I'm Tara, your friendly financial assistant. I can help you with:\n"
+        "• Stock market information\n"
+        "• Investment advice\n"
+        "• Personal finance tips\n\n"
+        "Just ask me anything about finance! 💰"
+    )
+    
+    await update.message.reply_text(welcome_message)
+    return HANDLE_MESSAGE
+
+async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Handle incoming messages and respond using the finance_agent."""
+    try:
+        if not update.message or not update.message.text:
+            logging.warning("Received empty message or no text in update")
+            return HANDLE_MESSAGE
+            
+        user_message = update.message.text
+        chat_id = update.effective_chat.id
+        user_id = update.effective_user.id
+        
+        logging.info(f"Received message from user {user_id} in chat {chat_id}: {user_message}")
+        
+        # Send typing action to show the bot is working
+        await context.bot.send_chat_action(chat_id=chat_id, action="typing")
+        
+        try:
+            # Get the agent's response
+            #logging.info("Getting response from finance_agent...")
+            # Run the agent and get a RunResponse object (or string for older versions)
+            response = finance_agent.run(user_message, session_id=str(chat_id))
+
+            # Extract the text content from the response
+            if hasattr(response, "content"):
+                agent_response = response.content  # Newer versions return RunResponse with .content
+            else:
+                agent_response = str(response)  # Fallback for string responses
+
+            #logging.info("Got response from finance_agent")
+            
+            # Send the response back to the user
+            #logging.info(f"Sending response to user {user_id}")
+            await update.message.reply_text(agent_response)
+            #logging.info("Response sent successfully")
+            
+        except Exception as e:
+            logging.error(f"Error in handle_message: {str(e)}")
+            logging.error(traceback.format_exc())
+            error_message = (
+                "Oops! Something went wrong while processing your request. "
+                "Please try again in a moment. If the problem persists, please contact support."
+            )
+            await update.message.reply_text(error_message)
+        
+        return HANDLE_MESSAGE
+        
+    except Exception as e:
+        logging.error(f"Critical error in handle_message: {str(e)}")
+        logging.error(traceback.format_exc())
+        return HANDLE_MESSAGE
+
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Send a message when the command /help is issued."""
+    help_text = (
+        "🤖 *Tara - Your Financial Assistant*\n\n"
+        "Here's what I can help you with:\n"
+        "• Get stock market information 📈\n"
+        "• Investment advice 💰\n"
+        "• Personal finance tips 💡\n"
+        "• Market analysis 📊\n\n"
+        "Just type your question, and I'll do my best to help!"
+    )
+    await update.message.reply_text(help_text, parse_mode='Markdown')
+
+async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Log errors and send a message to the user."""
+    logging.error("Exception while handling an update:", exc_info=context.error)
+    
+    if isinstance(update, Update):
+        error_message = (
+            "Sorry, I encountered an error while processing your message. "
+            "Please try again later or contact support if the issue persists."
+        )
+        await update.effective_message.reply_text(error_message)
+
+def run_telegram_bot():
+    """Start the Telegram bot."""
+    # Set up logging
+    #logging.basicConfig(
+    #    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    #    level=logging.DEBUG,  # Increased to DEBUG for more detailed logs
+    #    force=True  # Force reconfiguration of root logger
+    #)
+    
+    # Create the Application with more detailed logging
+    application = (
+        Application.builder()
+        .token(TELEGRAM_BOT_TOKEN)
+        .concurrent_updates(True)
+        .build()
+    )
+    
+    # Add a simple message handler for all text messages
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    
+    # Add command handlers
+    application.add_handler(CommandHandler('start', start))
+    application.add_handler(CommandHandler('help', help_command))
+    
+    # Add error handler
+    application.add_error_handler(error_handler)
+    
+    # Log bot info
+    logging.info("Starting Telegram bot...")
+    logging.info(f"Using token: {TELEGRAM_BOT_TOKEN[:10]}...{TELEGRAM_BOT_TOKEN[-5:]}")
+    
+    try:
+        # Start the Bot with polling
+        logging.info("Starting polling...")
+        application.run_polling(drop_pending_updates=True)
+    except Exception as e:
+        logging.error(f"Failed to start bot: {str(e)}")
+        logging.error(traceback.format_exc())
+        raise
+
+if __name__ == '__main__':
+    # Start the Telegram bot
+    run_telegram_bot()

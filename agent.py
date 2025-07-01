@@ -20,9 +20,10 @@ from agno.models.google import Gemini
 from agno.models.openai import OpenAIChat
 from agno.memory.v2.db.postgres import PostgresMemoryDb
 from agno.tools.exa import ExaTools
+from agno.tools.tavily import TavilyTools
 from agno.memory.v2.memory import Memory
 from agno.storage.postgres import PostgresStorage 
-from agno.media import Image, Audio, Video
+from agno.media import Image, Video
 from dotenv import load_dotenv
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
@@ -50,7 +51,7 @@ def setup_memory_and_storage():
     
     # Initialize memory with Gemini model for creating memories
     memory = Memory(
-        model=Gemini(id="gemini-2.0-flash-lite"),
+        model=OpenAIChat(id="gpt-4.1-nano"),
         db=memory_db
     )
     
@@ -66,11 +67,13 @@ def setup_memory_and_storage():
 memory, storage = setup_memory_and_storage()
 
 finance_agent = Agent(
-    model=Gemini(id="gemini-2.0-flash-lite"),  # This model supports multimodal
+    model=OpenAIChat(id="gpt-4.1-nano"),  # This model supports multimodal
     system_message=dedent("""\
         1. Core Identity
             You are Tara, a warm and expert financial advisor who speaks like a real human friend. Your mission is to build genuine connections with users and help them feel confident about their financial journey in India.
             You are trained to chat with users in telegram bot format.
+
+            MUST FOLLOW: No headings, no bold, no italic, no lists, no bullet points, JUST NATURAL TEXT.
 
         2. Language & Communication
             Auto-detect the user's language from their first message (English, Hindi, or Hinglish)
@@ -90,12 +93,8 @@ finance_agent = Agent(
             Stay Conversational: No bullet points in casual chat, write naturally
             Be Encouraging: Celebrate small wins and progress
 
-        5. Tool Usage: Exa Web Search
-            When to Search: For current data (stock prices, NAV, interest rates, market updates, specific fund details)
-            Tool Call: Use web_search(query: "specific and detailed search terms")
-            Search Quality: Use specific, detailed queries to get accurate results
-            Integration: Weave search results naturally into conversational responses
-            Accuracy: Always mention that financial data changes quickly and suggest they verify from official sources
+        5. Tool Usage: Tavily Web Search
+            When asked about latest news, market updates, or current data, use Tavily Web Search tool.
     
         6. Financial Guidelines
             No Guarantees: Use phrases like "One approach could be..." or "Have you considered...?"
@@ -125,7 +124,7 @@ finance_agent = Agent(
             Culturally Aware: Understand Indian family dynamics and social pressures
 
         9. Formatting Rules:
-            Telegram Chat Format: Use Telegram-style formatting (bold, italic, etc.)
+            Telegram Chat Format: Do not use Telegram-style formatting (bold, italic, etc.)
             Write in natural paragraphs, not lists (unless specifically requested)
 
         10. Memory & Personalization:
@@ -156,27 +155,8 @@ finance_agent = Agent(
     # Memory and Storage Configuration
     memory=memory,
     storage=storage,
-    tools=[ExaTools(
-       include_domains=[
-           "moneycontrol.com",
-           "economictimes.indiatimes.com",
-           "livemint.com",
-           "business-standard.com",
-           "nseindia.com",
-           "bseindia.com",
-           "zerodha.com",
-           "groww.in",
-           "paisabazaar.com",
-           "bankbazaar.com",
-           "valueinvesting.in",
-           "finshots.in",
-           "cnbc.com",
-           "reuters.com",
-           "bloomberg.com"
-       ],
-       category="finance, investing, indian markets, personal finance, mutual funds, stock market",
-       text_length_limit=1000,
-    )],
+
+    tools=[TavilyTools()],
     
     # Enable user memories to learn about user preferences
     enable_user_memories=True,
@@ -214,7 +194,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     
     user_input = ""
     images = []
-    audio = []
     videos = []
     
     # Handle text messages
@@ -239,6 +218,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         else:
             user_input = "Please analyze this image and provide relevant financial advice."
     
+    # Reject audio and video messages (not supported by GPT-4.1 nano)
+    if update.message.voice or update.message.audio or update.message.video:
+        await update.message.reply_text(
+            "Sorry, audio and video inputs aren't supported at the moment. Please send text or images."
+        )
+        return
+
     # Handle voice messages
     if update.message.voice:
         voice_file = await context.bot.get_file(update.message.voice.file_id)
@@ -315,8 +301,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             user_id=user_id,
             session_id=session_id,
             images=images if images else None,
-            audio=audio if audio else None,
-            videos=videos if videos else None,
             stream=False
         )
         
@@ -403,7 +387,7 @@ def run_telegram_bot(token: str) -> None:
     
     # THIS IS THE KEY FIX - Replace the old handler with multimodal support
     application.add_handler(MessageHandler(
-        filters.TEXT | filters.PHOTO | filters.VOICE | filters.AUDIO | filters.VIDEO | filters.Document.ALL,
+        filters.TEXT | filters.PHOTO | filters.Document.ALL,
         handle_message
     ))
     
@@ -552,7 +536,7 @@ async def process_whatsapp_message(phone_number: str, message: str, media_type: 
         memory = {}
 
     # Prepare media inputs
-    images, audio, videos = [], [], []
+    images, videos = [], []
     
     if media_type and media_id:
         try:
@@ -577,9 +561,8 @@ async def process_whatsapp_message(phone_number: str, message: str, media_type: 
                 if not message:
                     message = "Please analyze this image and provide relevant financial advice."
             elif media_type == 'audio':
-                audio.append(Audio(content=content))
-                if not message:
-                    message = "Please transcribe and respond to this audio message."
+                await send_whatsapp_message(phone_number, "Sorry, audio messages aren't supported currently.")
+                return
             elif media_type == 'video':
                 videos.append(Video(content=content))
                 if not message:
@@ -609,8 +592,6 @@ async def process_whatsapp_message(phone_number: str, message: str, media_type: 
             user_id=user_id,
             session_id=session_id,
             images=images,
-            audio=audio,
-            videos=videos,
             memory=memory
         )
         # Extract the actual string content
