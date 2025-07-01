@@ -50,7 +50,7 @@ def setup_memory_and_storage():
     
     # Initialize memory with Gemini model for creating memories
     memory = Memory(
-        model=OpenAIChat(id="gpt-4.1-nano-2025-04-14"),
+        model=Gemini(id="gemini-2.0-flash-lite"),
         db=memory_db
     )
     
@@ -66,7 +66,7 @@ def setup_memory_and_storage():
 memory, storage = setup_memory_and_storage()
 
 finance_agent = Agent(
-    model=OpenAIChat(id="gpt-4.1-nano-2025-04-14"),  # This model supports multimodal
+    model=Gemini(id="gemini-2.0-flash-lite"),  # This model supports multimodal
     system_message=dedent("""\
         1. Core Identity
             You are Tara, a warm and expert financial advisor who speaks like a real human friend. Your mission is to build genuine connections with users and help them feel confident about their financial journey in India.
@@ -212,17 +212,14 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     if not update.message:
         return
     
-    message_content = []
+    user_input = ""
     images = []
     audio = []
     videos = []
     
     # Handle text messages
     if update.message.text:
-        message_content.append({
-            "type": "text",
-            "text": update.message.text
-        })
+        user_input = update.message.text
     
     # Handle photo messages
     if update.message.photo:
@@ -234,21 +231,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         response = requests.get(photo_file.file_path)
         photo_content = response.content
         
-        # Add image to both message content and images list
         images.append(Image(content=photo_content))
-        message_content.append({
-            "type": "image_url",
-            "image_url": {
-                "url": f"data:image/jpeg;base64,{base64.b64encode(photo_content).decode('utf-8')}"
-            }
-        })
         
-        # If there's a caption, add it as text
+        # If there's a caption, use it as user input
         if update.message.caption:
-            message_content.append({
-                "type": "text",
-                "text": update.message.caption
-            })
+            user_input = update.message.caption
+        else:
+            user_input = "Please analyze this image and provide relevant financial advice."
     
     # Handle voice messages
     if update.message.voice:
@@ -258,12 +247,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         response = requests.get(voice_file.file_path)
         voice_content = response.content
         
-        # Add audio to both message content and audio list
         audio.append(Audio(content=voice_content, format="ogg"))
-        message_content.append({
-            "type": "text",
-            "text": "Please transcribe and respond to this audio message."
-        })
+        user_input = "Please transcribe and respond to this audio message."
     
     # Handle audio files
     if update.message.audio:
@@ -273,12 +258,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         response = requests.get(audio_file.file_path)
         audio_content = response.content
         
-        # Add audio to both message content and audio list
         audio.append(Audio(content=audio_content))
-        message_content.append({
-            "type": "text",
-            "text": "Please analyze this audio file and provide relevant financial advice."
-        })
+        user_input = "Please analyze this audio file and provide relevant financial advice."
     
     # Handle video messages
     if update.message.video:
@@ -288,15 +269,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         response = requests.get(video_file.file_path)
         video_content = response.content
         
-        # Add video to both message content and videos list
         videos.append(Video(content=video_content))
         
-        # If there's a caption, add it as text
         if update.message.caption:
-            message_content.append({
-                "type": "text",
-                "text": update.message.caption
-            })
+            user_input = update.message.caption
+        else:
+            user_input = "Please analyze this video and provide relevant financial advice."
     
     # Handle documents (images as documents)
     if update.message.document:
@@ -308,24 +286,15 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             response = requests.get(doc_file.file_path)
             doc_content = response.content
             
-            # Add image to both message content and images list
             images.append(Image(content=doc_content))
-            message_content.append({
-                "type": "image_url",
-                "image_url": {
-                    "url": f"data:image/{document.mime_type.split('/')[-1]};base64,{base64.b64encode(doc_content).decode('utf-8')}"
-                }
-            })
             
-            # If there's a caption, add it as text
             if update.message.caption:
-                message_content.append({
-                    "type": "text",
-                    "text": update.message.caption
-                })
+                user_input = update.message.caption
+            else:
+                user_input = "Please analyze this image and provide relevant financial advice."
     
     # If no content was found, return
-    if not message_content and not images and not audio and not videos:
+    if not user_input and not images and not audio and not videos:
         await update.message.reply_text("Sorry, I couldn't process your message. Please send text, image, or audio.")
         return
     
@@ -339,10 +308,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     )
     
     try:
-        # Call the finance agent with the structured message content and any media
+        # Get the response with multimodal inputs
         response = await asyncio.to_thread(
             finance_agent.run,
-            message_content if message_content else "Please analyze the attached media.",
+            user_input,
             user_id=user_id,
             session_id=session_id,
             images=images if images else None,
