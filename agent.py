@@ -186,15 +186,15 @@ Are you thinking of investing, or just keeping an eye on it?"
     ],
     
     # Enable user memories to learn about user preferences
-    #enable_user_memories=True,
+    enable_user_memories=True,
     show_tool_calls=True,
     
     # Enable session summaries for long conversations
-    #enable_session_summaries=True,
+    enable_session_summaries=True,
     
     # Add chat history to messages for context
-    #add_history_to_messages=True,
-    #num_history_runs=3,
+    add_history_to_messages=True,
+    num_history_runs=3,
     
     # Enable the agent to read chat history when needed
     #read_chat_history=True,
